@@ -1,0 +1,57 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+.pnpm-store/
+
+# NestJS / TypeScript build outputs
+dist/
+build/
+.turbo/
+*.tsbuildinfo
+
+# Compiled seed artifacts (we ship .ts source only; .js comes from build)
+apps/api/prisma/seed/*.js
+apps/api/prisma/seed/*.js.map
+apps/api/prisma/seed/*.d.ts
+apps/api/prisma/seed/*.d.ts.map
+
+# Prisma local sqlite DBs (if any) — schema lives in apps/api/prisma/
+apps/api/prisma/*.db
+apps/api/prisma/*.db-journal
+
+# Testing
+coverage/
+.nyc_output/
+
+# Environment / secrets — never commit these
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Firebase admin keys (if any are accidentally placed alongside the app)
+*firebase-adminsdk*.json
+*service-account*.json
+
+# IDE
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# OS
+*.pid
+*.seed
+*.pid.lock

@@ -1,0 +1,1197 @@
+// ============================================================
+// OffersKatta — Prisma schema
+// PostgreSQL. UUID PKs everywhere. Soft deletes via `deletedAt`.
+// Audit fields: createdAt / updatedAt / deletedAt / createdById / updatedById.
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// Enums
+// ============================================================
+
+enum UserRole {
+  SUPER_ADMIN
+  SELLER_OWNER
+  /// Manages every branch under one or more Regions (via TerritoryManager).
+  REGIONAL_MANAGER
+  /// Manages every branch under one or more Zones (via TerritoryManager).
+  ZONE_MANAGER
+  BUSINESS_MANAGER
+  STAFF
+  CUSTOMER
+}
+
+enum BusinessType {
+  SHOP
+  RESTAURANT
+  HOTEL
+  SALON
+  GYM
+  SERVICE_PROVIDER
+  LOCAL_BUSINESS
+  OTHER
+}
+
+enum BrandStatus {
+  PENDING_VERIFICATION
+  ACTIVE
+  SUSPENDED
+  REJECTED
+}
+
+enum BranchStatus {
+  ACTIVE
+  INACTIVE
+  TEMPORARILY_CLOSED
+  PERMANENTLY_CLOSED
+}
+
+enum OfferStatus {
+  DRAFT
+  PUBLISHED
+  PAUSED
+  EXPIRED
+  ARCHIVED
+}
+
+enum OfferType {
+  PERCENTAGE
+  FLAT
+  BUY_ONE_GET_ONE
+  FREE_ITEM
+  BUNDLE
+}
+
+enum SubscriptionPlan {
+  FREE
+  PREMIUM
+  FEATURED
+  /// Phase 9 — top tier. NOT self-serve: provisioned by the sales team via an
+  /// EnterpriseLead after an offline contract. Custom pricing, highest push
+  /// priority, no Razorpay flow.
+  ENTERPRISE
+}
+
+/// Phase 9 — sales pipeline status for an inbound Enterprise enquiry.
+enum EnterpriseLeadStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  WON
+  LOST
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELLED
+  EXPIRED
+  PAST_DUE
+  TRIALING
+}
+
+enum BillingInterval {
+  MONTHLY
+  YEARLY
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
+enum NotificationType {
+  OFFER
+  BOOKING
+  REDEMPTION
+  PAYMENT
+  SYSTEM
+  REVIEW
+  INVITATION
+}
+
+enum NotificationChannel {
+  PUSH
+  EMAIL
+  SMS
+  IN_APP
+}
+
+enum RedemptionStatus {
+  PENDING
+  REDEEMED
+  EXPIRED
+  CANCELLED
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  EXPIRED
+  REVOKED
+}
+
+enum CardCategory {
+  CREDIT
+  DEBIT
+  PREPAID
+  CORPORATE
+}
+
+enum ScopeType {
+  GLOBAL
+  BRAND
+  BRANCH
+}
+
+// ============================================================
+// Identity
+// ============================================================
+
+model User {
+  id           String    @id @default(uuid()) @db.Uuid
+  email        String?   @unique
+  phone        String?   @unique
+  firebaseUid  String?   @unique
+  passwordHash String?
+  fullName     String?
+  avatarUrl    String?
+  role         UserRole  @default(CUSTOMER)
+  isVerified   Boolean   @default(false)
+  isActive     Boolean   @default(true)
+  lastLoginAt  DateTime?
+  fcmToken     String?
+  locale       String    @default("en")
+
+  // Customer profile fields
+  dateOfBirth DateTime?
+  gender      String?
+  city        String?
+  state       String?
+  country     String?
+  latitude    Float?
+  longitude   Float?
+  /// Phase 8 — PostGIS geography point auto-synced from lat/lng via the
+  /// users_geog_sync trigger (see prisma/sql/postgis.sql). Invisible to the
+  /// Prisma client; used only by raw-SQL nearby queries (ST_DWithin).
+  geog        Unsupported("geography(Point, 4326)")?
+
+  // Audit
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+  createdById String?   @db.Uuid
+  updatedById String?   @db.Uuid
+
+  // Relations
+  ownedBrands      BusinessBrand[]      @relation("BrandOwner")
+  managerRoles     BusinessManager[]
+  staffAssignments StaffAssignment[]
+  invitationsSent  Invitation[]         @relation("InvitedBy")
+  refreshTokens    RefreshToken[]
+  favorites        Favorite[]
+  reviews          Review[]
+  notifications    Notification[]
+  redemptions      OfferRedemption[]    @relation("RedemptionCustomer")
+  staffRedemptions OfferRedemption[]    @relation("RedemptionStaff")
+  payments         Payment[]
+  userRoles        UserRoleAssignment[]
+  auditLogs        AuditLog[]
+  customerProfile  CustomerProfile?
+  pushJobsTriggered PushJob[]           @relation("PushTriggeredBy")
+  brandFollows     BrandFollow[]
+  territoryRoles   TerritoryManager[]
+
+  @@index([email])
+  @@index([phone])
+  @@index([role])
+  @@index([deletedAt])
+  @@index([latitude, longitude])
+  // Phase 8 — GIST index on the geog column (created in postgis.sql so
+  // it survives extension-less environments). Listed here so Prisma's
+  // introspection treats the table as up-to-date.
+  @@index([geog], type: Gist)
+  @@map("users")
+}
+
+/// Customer-only extension of User. Exists 1–1 with users where role=CUSTOMER.
+/// Stores the bits we need for push targeting + opt-in:
+///   * phoneVerified — true once the OTP confirms the number
+///   * fcmTokens     — one entry per device the customer logs into
+///   * notifyEnabled — opt-out switch the customer controls
+///   * notificationRadiusKm — how far away from a shop the customer is willing to be pinged
+/// User.latitude / User.longitude remain the source of truth for the customer's
+/// last known location; we don't duplicate those here.
+model CustomerProfile {
+  userId               String   @id @db.Uuid
+  phoneVerified        Boolean  @default(false)
+  fcmTokens            String[] @default([])
+  notifyEnabled        Boolean  @default(true)
+  notificationRadiusKm Int      @default(10)
+  /// When true, the push pipeline skips this customer during their local
+  /// quiet hours (default 21:00–09:00 in PUSH_QUIET_TZ — Asia/Kolkata).
+  /// The PushJob counts them as `deferred` so sellers see the impact.
+  quietHoursEnabled    Boolean  @default(true)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("customer_profiles")
+}
+
+/// Many-to-many between customers and brands they want to follow. A follower
+/// receives push for any offer the brand publishes, regardless of their
+/// distance from the brand's branches. Composite-PK so it's idempotent.
+model BrandFollow {
+  userId    String   @db.Uuid
+  brandId   String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  user  User          @relation(fields: [userId],  references: [id], onDelete: Cascade)
+  brand BusinessBrand @relation(fields: [brandId], references: [id], onDelete: Cascade)
+
+  @@id([userId, brandId])
+  @@index([brandId])
+  @@map("brand_follows")
+}
+
+/// One row per "notify nearby" trigger. Lets us track who pushed what, how
+/// many customers were eligible, how many got the message (vs dropped by the
+/// frequency cap) and surface failures back in the seller UI.
+///
+/// QUEUED   = enqueued to BullMQ, worker hasn't picked it up yet
+/// PROCESSING = worker is computing recipients + sending
+/// COMPLETED  = worker finished (success or partial — see counters)
+/// FAILED     = worker threw before completing (message in errorMessage)
+enum PushJobStatus {
+  QUEUED
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+model PushJob {
+  id                  String        @id @default(uuid()) @db.Uuid
+  offerId             String        @db.Uuid
+  brandId             String        @db.Uuid
+  triggeredById       String        @db.Uuid
+  radiusKm            Int
+  status              PushJobStatus @default(PENDING)
+  // Recipient pipeline counters — see PushService.processJob for the meaning.
+  //   planned  = matched + opt-in + verified
+  //   capped   = dropped by per-customer frequency limit
+  //   deferred = skipped because in quiet hours (customer's local night)
+  //   sent     = handed to FCM successfully (or stub-logged in dev)
+  //   failed   = FCM rejected the token (dead/unregistered/invalid)
+  recipientsPlanned   Int           @default(0)
+  recipientsCapped    Int           @default(0)
+  recipientsDeferred  Int           @default(0)
+  recipientsSent      Int           @default(0)
+  recipientsFailed    Int           @default(0)
+  errorMessage        String?
+  // BullMQ priority assigned at enqueue time based on the brand's plan —
+  // 1 = enterprise / boosted, 10 = free. Lower = earlier.
+  priority            Int           @default(10)
+  createdAt           DateTime      @default(now())
+  startedAt           DateTime?
+  finishedAt          DateTime?
+
+  offer       Offer        @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  triggeredBy User         @relation("PushTriggeredBy", fields: [triggeredById], references: [id])
+
+  @@index([status])
+  @@index([brandId])
+  @@index([createdAt])
+  @@map("push_jobs")
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  userAgent String?
+  ipAddress String?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+// ============================================================
+// RBAC
+// ============================================================
+
+model Role {
+  id          String  @id @default(uuid()) @db.Uuid
+  name        String  @unique
+  slug        String  @unique
+  description String?
+  isSystem    Boolean @default(false)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  rolePermissions RolePermission[]
+  userAssignments UserRoleAssignment[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String  @id @default(uuid()) @db.Uuid
+  name        String
+  slug        String  @unique
+  resource    String
+  action      String
+  description String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  rolePermissions RolePermission[]
+
+  @@unique([resource, action])
+  @@index([resource])
+  @@map("permissions")
+}
+
+model RolePermission {
+  id           String   @id @default(uuid()) @db.Uuid
+  roleId       String   @db.Uuid
+  permissionId String   @db.Uuid
+  createdAt    DateTime @default(now())
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserRoleAssignment {
+  id        String     @id @default(uuid()) @db.Uuid
+  userId    String     @db.Uuid
+  roleId    String     @db.Uuid
+  scopeType ScopeType  @default(GLOBAL)
+  scopeId   String?
+  createdAt DateTime   @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId, scopeType, scopeId])
+  @@index([userId])
+  @@index([scopeType, scopeId])
+  @@map("user_role_assignments")
+}
+
+// ============================================================
+// Business hierarchy: Brand → Branch → Manager / Staff
+// ============================================================
+
+model BusinessBrand {
+  id           String       @id @default(uuid()) @db.Uuid
+  ownerId      String       @db.Uuid
+  name         String
+  slug         String       @unique
+  description  String?
+  logoUrl      String?
+  coverUrl     String?
+  websiteUrl   String?
+  businessType BusinessType
+  status       BrandStatus  @default(PENDING_VERIFICATION)
+  isVerified   Boolean      @default(false)
+  verifiedAt   DateTime?
+  gstNumber    String?
+  panNumber    String?
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+  createdById String?   @db.Uuid
+  updatedById String?   @db.Uuid
+
+  owner        User             @relation("BrandOwner", fields: [ownerId], references: [id])
+  branches     BusinessBranch[]
+  categories   BrandCategory[]
+  subscription Subscription?
+  payments     Payment[]
+  invitations  Invitation[]
+  followers    BrandFollow[]
+  regions      BusinessRegion[]
+  zones        BusinessZone[]
+  enterpriseLeads EnterpriseLead[]
+  territoryManagers TerritoryManager[]
+
+  @@index([ownerId])
+  @@index([status])
+  @@index([businessType])
+  @@index([deletedAt])
+  @@map("business_brands")
+}
+
+/// Top of the geographic hierarchy under a brand — e.g. "West India", "North
+/// India". Optional: small brands with a handful of branches can skip the
+/// hierarchy entirely and leave Branch.zoneId null.
+model BusinessRegion {
+  id        String   @id @default(uuid()) @db.Uuid
+  brandId   String   @db.Uuid
+  name      String
+  slug      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  brand BusinessBrand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  zones BusinessZone[]
+  managers TerritoryManager[]
+
+  @@unique([brandId, slug])
+  @@index([brandId])
+  @@map("business_regions")
+}
+
+/// One level below Region. A Region "West India" might have zones
+/// "Maharashtra", "Gujarat", "Goa". Branches are pinned to a zone, not a
+/// region directly — we get the region for free via the zone.
+model BusinessZone {
+  id        String   @id @default(uuid()) @db.Uuid
+  brandId   String   @db.Uuid
+  regionId  String   @db.Uuid
+  name      String
+  slug      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  brand    BusinessBrand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  region   BusinessRegion   @relation(fields: [regionId], references: [id], onDelete: Cascade)
+  branches BusinessBranch[]
+  managers TerritoryManager[]
+
+  @@unique([brandId, slug])
+  @@index([brandId])
+  @@index([regionId])
+  @@map("business_zones")
+}
+
+/// Phase 6 (completion) — assigns a user as a manager of a Region OR a Zone
+/// within a brand. Exactly one of regionId/zoneId is set:
+///   regionId set → REGIONAL_MANAGER scope (all zones+branches in that region)
+///   zoneId   set → ZONE_MANAGER scope (all branches in that zone)
+/// The TerritoryScopeService reads these rows to constrain what a manager can
+/// see and write across branches, offers and push.
+model TerritoryManager {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  brandId   String   @db.Uuid
+  regionId  String?  @db.Uuid
+  zoneId    String?  @db.Uuid
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  createdById String? @db.Uuid
+
+  user   User            @relation(fields: [userId],  references: [id], onDelete: Cascade)
+  brand  BusinessBrand   @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  region BusinessRegion? @relation(fields: [regionId], references: [id], onDelete: Cascade)
+  zone   BusinessZone?   @relation(fields: [zoneId],   references: [id], onDelete: Cascade)
+
+  // A user is assigned to a given region/zone at most once.
+  @@unique([userId, regionId, zoneId])
+  @@index([brandId])
+  @@index([userId])
+  @@index([regionId])
+  @@index([zoneId])
+  @@map("territory_managers")
+}
+
+model BusinessBranch {
+  id           String       @id @default(uuid()) @db.Uuid
+  brandId      String       @db.Uuid
+  name         String
+  slug         String
+  description  String?
+  addressLine1 String
+  addressLine2 String?
+  city         String
+  state        String
+  country      String
+  postalCode   String
+  latitude     Float
+  longitude    Float
+  /// Phase 8 — see User.geog. Synced by business_branches_geog_sync trigger.
+  geog         Unsupported("geography(Point, 4326)")?
+  phone        String?
+  email        String?
+  workingHours Json?
+  images       String[]     @default([])
+  status       BranchStatus @default(ACTIVE)
+  isActive     Boolean      @default(true)
+
+  // Free-form labels — sellers use these to bucket branches ("flagship",
+  // "metro", "tier-2", "south") and target an offer at all of them at once
+  // via Offer.scope = TAGS. Empty by default; no enum.
+  tags         String[]     @default([])
+
+  // Optional Region/Zone hierarchy (Phase 6). For chain sellers with 600+
+  // branches, this lets them group stores under Region → Zone and (later)
+  // scope a Regional Manager's view to just their region. Null = not in any
+  // zone; small brands can ignore the hierarchy entirely.
+  zoneId       String?      @db.Uuid
+
+  // Optional mall placement. shopNumber is free-form ("F-23", "Ground Floor, Block C").
+  mallId       String?      @db.Uuid
+  shopNumber   String?
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+  createdById String?   @db.Uuid
+  updatedById String?   @db.Uuid
+
+  brand    BusinessBrand     @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  mall     Mall?             @relation(fields: [mallId], references: [id])
+  zone     BusinessZone?     @relation(fields: [zoneId], references: [id])
+  managers BusinessManager[]
+  staff    StaffAssignment[]
+  offers   Offer[]
+  offerBranches OfferBranch[]
+  reviews  Review[]
+
+  @@unique([brandId, slug])
+  @@index([brandId])
+  @@index([mallId])
+  @@index([zoneId])
+  @@index([latitude, longitude])
+  @@index([geog], type: Gist)
+  @@index([status])
+  @@index([city])
+  @@index([deletedAt])
+  @@map("business_branches")
+}
+
+model Mall {
+  id           String  @id @default(uuid()) @db.Uuid
+  name         String
+  slug         String  @unique
+  description  String?
+  addressLine1 String
+  addressLine2 String?
+  city         String
+  state        String
+  country      String
+  postalCode   String
+  latitude     Float
+  longitude    Float
+  /// Phase 8 — see User.geog. Synced by malls_geog_sync trigger.
+  geog         Unsupported("geography(Point, 4326)")?
+  phone        String?
+  email        String?
+  websiteUrl   String?
+  logoUrl      String?
+  coverUrl     String?
+  images       String[]  @default([])
+  workingHours Json?
+  isActive     Boolean   @default(true)
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+  createdById String?   @db.Uuid
+  updatedById String?   @db.Uuid
+
+  branches BusinessBranch[]
+
+  @@index([city])
+  @@index([latitude, longitude])
+  @@index([geog], type: Gist)
+  @@index([deletedAt])
+  @@map("malls")
+}
+
+/// Master list of serviceable cities (with their state), managed from the
+/// admin/seller panels. UIs use this to render a City dropdown instead of a
+/// free-text input. We keep the denormalised `city` string on branches/malls
+/// (and Offer.scopeCity) — this table just constrains/standardises the values.
+model City {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  state     String
+  country   String   @default("India")
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  createdById String? @db.Uuid
+
+  // Same city name can exist in different states (e.g. Hyderabad), so the
+  // uniqueness is on the pair.
+  @@unique([name, state])
+  @@index([state])
+  @@index([isActive])
+  @@map("cities")
+}
+
+/// Master list of states + union territories. Seeded with all 28 states and
+/// 8 UTs of India; powers the State dropdown on the city form. `code` is the
+/// ISO 3166-2:IN short code (MH, DL, …); `isUnionTerritory` flags UTs.
+model State {
+  id               String   @id @default(uuid()) @db.Uuid
+  name             String   @unique
+  code             String?
+  isUnionTerritory Boolean  @default(false)
+  country          String   @default("India")
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([isActive])
+  @@map("states")
+}
+
+model BusinessManager {
+  id          String  @id @default(uuid()) @db.Uuid
+  userId      String  @db.Uuid
+  branchId    String  @db.Uuid
+  invitedById String? @db.Uuid
+  permissions Json?
+  isActive    Boolean @default(true)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  user   User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  branch BusinessBranch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, branchId])
+  @@index([branchId])
+  @@index([userId])
+  @@map("business_managers")
+}
+
+model StaffAssignment {
+  id          String  @id @default(uuid()) @db.Uuid
+  userId      String  @db.Uuid
+  branchId    String  @db.Uuid
+  permissions Json?
+  isActive    Boolean @default(true)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  user   User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  branch BusinessBranch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, branchId])
+  @@index([branchId])
+  @@index([userId])
+  @@map("staff_assignments")
+}
+
+model Invitation {
+  id          String           @id @default(uuid()) @db.Uuid
+  brandId     String?          @db.Uuid
+  branchId    String?          @db.Uuid
+  email       String
+  role        UserRole
+  tokenHash   String           @unique
+  status      InvitationStatus @default(PENDING)
+  invitedById String           @db.Uuid
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  brand     BusinessBrand? @relation(fields: [brandId], references: [id])
+  invitedBy User           @relation("InvitedBy", fields: [invitedById], references: [id])
+
+  @@index([email])
+  @@index([status])
+  @@index([brandId])
+  @@map("invitations")
+}
+
+// ============================================================
+// Catalog & Offers
+// ============================================================
+
+model Category {
+  id          String  @id @default(uuid()) @db.Uuid
+  name        String  @unique
+  slug        String  @unique
+  description String?
+  iconUrl     String?
+  parentId    String? @db.Uuid
+  sortOrder   Int     @default(0)
+  isActive    Boolean @default(true)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  parent   Category?       @relation("CategoryParent", fields: [parentId], references: [id])
+  children Category[]      @relation("CategoryParent")
+  offers   OfferCategory[]
+  brands   BrandCategory[]
+
+  @@index([parentId])
+  @@index([slug])
+  @@map("categories")
+}
+
+model BrandCategory {
+  brandId    String   @db.Uuid
+  categoryId String   @db.Uuid
+  createdAt  DateTime @default(now())
+
+  brand    BusinessBrand @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  category Category      @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@id([brandId, categoryId])
+  @@map("brand_categories")
+}
+
+enum OfferVisibility {
+  PUBLIC
+  MEMBERS
+  NEW_CUSTOMERS
+  REFERRAL
+}
+
+/// How the offer applies across the brand's branches.
+///   BRANCH — only the offer's primary branch + the explicitly-listed extras
+///            in OfferBranch. The original (and default) behaviour.
+///   BRAND  — applies to *every* branch in the brand. The seller doesn't have
+///            to pick them; new branches added later are automatically covered.
+///   CITY   — applies to every branch in the brand whose `city` matches
+///            `scopeCity` (case-insensitive). Great for "Mumbai-wide sale".
+///   TAGS   — applies to every branch in the brand whose `tags[]` overlaps
+///            with `scopeTags[]`. Lets sellers tag stores (e.g. "flagship",
+///            "metro", "tier-2") and target the tag instead of picking IDs.
+enum OfferScope {
+  BRANCH
+  BRAND
+  CITY
+  TAGS
+}
+
+model Offer {
+  id                 String      @id @default(uuid()) @db.Uuid
+  branchId           String      @db.Uuid
+  title              String
+  slug               String
+  description        String?
+  termsAndConditions String?
+  offerType          OfferType
+  discountValue      Float
+  maxDiscountAmount  Float?
+  minPurchaseAmount  Float?
+  originalPrice      Float?
+  finalPrice         Float?
+  images             String[]    @default([])
+  videoUrl           String?
+  // Thumbnail shown on offer cards (list/grid). When null, the card falls
+  // back to the gradient discount-text placeholder. Never rendered on the
+  // offer detail page — `images[]` is the source of truth there.
+  listImage          String?
+  // ── Scope: how this offer spreads across the brand's branches ──
+  // Default BRANCH preserves the old behaviour (uses branchId + OfferBranch).
+  // BRAND/CITY/TAGS resolve the branch set on read so chain sellers don't
+  // have to pick 600 branches per offer.
+  scope              OfferScope @default(BRANCH)
+  scopeCity          String?
+  scopeTags          String[]   @default([])
+  startsAt           DateTime
+  expiresAt          DateTime
+  status             OfferStatus @default(DRAFT)
+  isFeatured         Boolean     @default(false)
+  // Paid-boost expiry — when set, the offer un-features automatically once it passes.
+  featuredUntil      DateTime?
+  isExclusive        Boolean     @default(false)
+  totalRedemptions   Int         @default(0)
+  maxRedemptions     Int?
+  redemptionPerUser  Int?
+  viewCount          Int         @default(0)
+  clickCount         Int         @default(0)
+  shareCount         Int         @default(0)
+
+  // ── Recurring window (e.g. Happy Hours: Mon–Fri, 16:00–21:00). ──
+  // isRecurring=true means the offer is active only on the listed days &
+  // time window within the overall startsAt/expiresAt validity span.
+  // recurringDays uses ISO 0=Sunday … 6=Saturday.
+  isRecurring        Boolean     @default(false)
+  recurringDays      Int[]       @default([])
+  recurringStartTime String?
+  recurringEndTime   String?
+
+  // ── Promo / targeting / bilingual fields (parity with OfferKatta ERP). ──
+  couponCode          String?
+  titleHindi          String?
+  descriptionRegional String?
+  priority            Int             @default(5)
+  visibility          OfferVisibility @default(PUBLIC)
+  applicableProducts  String?
+  excludedProducts    String?
+  isStackable         Boolean         @default(false)
+  tags                String[]        @default([])
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+  createdById String?   @db.Uuid
+  updatedById String?   @db.Uuid
+
+  branch      BusinessBranch    @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  categories  OfferCategory[]
+  cardTypes   OfferCardType[]
+  branches    OfferBranch[]
+  platforms   OfferPlatform[]
+  favorites   Favorite[]
+  redemptions OfferRedemption[]
+  reviews     Review[]
+  pushJobs    PushJob[]
+
+  @@unique([branchId, slug])
+  @@index([branchId])
+  @@index([status])
+  @@index([startsAt, expiresAt])
+  @@index([isFeatured])
+  @@index([isRecurring])
+  @@index([deletedAt])
+  @@map("offers")
+}
+
+model OfferCategory {
+  offerId    String   @db.Uuid
+  categoryId String   @db.Uuid
+  createdAt  DateTime @default(now())
+
+  offer    Offer    @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@id([offerId, categoryId])
+  @@map("offer_categories")
+}
+
+// ============================================================
+// Banks / cards — for credit-card offers ("Valid on HDFC Diners Black")
+// ============================================================
+
+model Bank {
+  id        String     @id @default(uuid()) @db.Uuid
+  name      String     @unique
+  slug      String     @unique
+  logoUrl   String?
+  isActive  Boolean    @default(true)
+
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  deletedAt DateTime?
+
+  cards CardType[]
+
+  @@map("banks")
+}
+
+model CardType {
+  id       String       @id @default(uuid()) @db.Uuid
+  bankId   String       @db.Uuid
+  name     String
+  network  String?
+  category CardCategory @default(CREDIT)
+  isActive Boolean      @default(true)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  bank   Bank            @relation(fields: [bankId], references: [id], onDelete: Cascade)
+  offers OfferCardType[]
+
+  @@unique([bankId, name])
+  @@index([bankId])
+  @@index([category])
+  @@map("card_types")
+}
+
+model OfferCardType {
+  offerId      String   @db.Uuid
+  cardTypeId   String   @db.Uuid
+  cardCategory String?  // "Credit" | "Debit" | "Both" — null = any
+  benefitType  String?  // "Cashback" | "Discount" | "No-cost EMI" | "Extra Off" | "Reward Points"
+  benefitValue String?  // free-form, e.g. "10%" or "₹500"
+  minSpend     Float?
+  maxBenefit   Float?
+  createdAt    DateTime @default(now())
+
+  offer    Offer    @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  cardType CardType @relation(fields: [cardTypeId], references: [id], onDelete: Cascade)
+
+  @@id([offerId, cardTypeId])
+  @@index([cardTypeId])
+  @@map("offer_card_types")
+}
+
+// Additional branches an offer applies to. The primary branch stays on
+// Offer.branchId; this join carries any extra shops the offer also covers.
+model OfferBranch {
+  offerId   String   @db.Uuid
+  branchId  String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  offer  Offer          @relation(fields: [offerId], references: [id], onDelete: Cascade)
+  branch BusinessBranch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@id([offerId, branchId])
+  @@index([branchId])
+  @@map("offer_branches")
+}
+
+// Online platforms (Amazon, Flipkart, brand website, …) where the offer also runs.
+model OfferPlatform {
+  id           String   @id @default(uuid()) @db.Uuid
+  offerId      String   @db.Uuid
+  platformName String
+  url          String?
+  createdAt    DateTime @default(now())
+
+  offer Offer @relation(fields: [offerId], references: [id], onDelete: Cascade)
+
+  @@index([offerId])
+  @@map("offer_platforms")
+}
+
+// ============================================================
+// Customer engagement
+// ============================================================
+
+model Favorite {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  offerId   String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  offer Offer @relation(fields: [offerId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, offerId])
+  @@index([userId])
+  @@map("favorites")
+}
+
+model Review {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @db.Uuid
+  offerId    String?  @db.Uuid
+  branchId   String?  @db.Uuid
+  rating     Int
+  title      String?
+  comment    String?
+  images     String[] @default([])
+  isApproved Boolean  @default(true)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  user   User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  offer  Offer?          @relation(fields: [offerId], references: [id])
+  branch BusinessBranch? @relation(fields: [branchId], references: [id])
+
+  @@index([userId])
+  @@index([offerId])
+  @@index([branchId])
+  @@index([rating])
+  @@map("reviews")
+}
+
+model OfferRedemption {
+  id                String           @id @default(uuid()) @db.Uuid
+  offerId           String           @db.Uuid
+  customerId        String           @db.Uuid
+  redeemedByStaffId String?          @db.Uuid
+  branchId          String           @db.Uuid
+  qrCode            String           @unique
+  status            RedemptionStatus @default(PENDING)
+  redeemedAt        DateTime?
+  expiresAt         DateTime
+  discountApplied   Float?
+  finalAmount       Float?
+  notes             String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  offer      Offer @relation(fields: [offerId], references: [id])
+  customer   User  @relation("RedemptionCustomer", fields: [customerId], references: [id])
+  redeemedBy User? @relation("RedemptionStaff", fields: [redeemedByStaffId], references: [id])
+
+  @@index([offerId])
+  @@index([customerId])
+  @@index([branchId])
+  @@index([status])
+  @@index([expiresAt])
+  @@map("offer_redemptions")
+}
+
+// ============================================================
+// Billing
+// ============================================================
+
+model Subscription {
+  id              String             @id @default(uuid()) @db.Uuid
+  brandId         String             @unique @db.Uuid
+  plan            SubscriptionPlan   @default(FREE)
+  status          SubscriptionStatus @default(ACTIVE)
+  startDate       DateTime           @default(now())
+  endDate         DateTime?
+  trialEndsAt     DateTime?
+  cancelledAt    DateTime?
+  razorpaySubId   String?            @unique
+  amount          Float              @default(0)
+  currency        String             @default("INR")
+  billingInterval BillingInterval    @default(MONTHLY)
+  autoRenew       Boolean            @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  brand    BusinessBrand @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  payments Payment[]
+
+  @@index([status])
+  @@map("subscriptions")
+}
+
+/// Phase 9 — an inbound "Contact Sales" enquiry for the Enterprise plan.
+/// Anyone can submit one (public endpoint); a signed-in seller's submission
+/// also carries submittedById + the brand they want upgraded. Super admins
+/// work these through the pipeline and, on WON, provision ENTERPRISE for the
+/// brand (offline-invoiced — no Razorpay).
+model EnterpriseLead {
+  id                String               @id @default(uuid()) @db.Uuid
+  companyName       String
+  contactName       String
+  email             String
+  phone             String?
+  estimatedBranches Int?
+  message           String?
+  status            EnterpriseLeadStatus @default(NEW)
+
+  // Optional linkage when a logged-in seller submits for a specific brand.
+  brandId       String? @db.Uuid
+  submittedById String? @db.Uuid
+
+  // Sales workflow.
+  internalNotes String?
+  handledById   String? @db.Uuid
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  brand BusinessBrand? @relation(fields: [brandId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([createdAt])
+  @@index([brandId])
+  @@map("enterprise_leads")
+}
+
+model Payment {
+  id                String        @id @default(uuid()) @db.Uuid
+  brandId           String        @db.Uuid
+  userId            String        @db.Uuid
+  subscriptionId    String?       @db.Uuid
+  offerId           String?       @db.Uuid
+  boostDays         Int?
+  razorpayOrderId   String?       @unique
+  razorpayPaymentId String?       @unique
+  razorpaySignature String?
+  amount            Float
+  currency          String        @default("INR")
+  status            PaymentStatus @default(PENDING)
+  description       String?
+  metadata          Json?
+  paidAt            DateTime?
+  refundedAt        DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  brand        BusinessBrand @relation(fields: [brandId], references: [id])
+  user         User          @relation(fields: [userId], references: [id])
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  @@index([brandId])
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("payments")
+}
+
+// ============================================================
+// Notifications & audit
+// ============================================================
+
+model Notification {
+  id      String              @id @default(uuid()) @db.Uuid
+  userId  String              @db.Uuid
+  type    NotificationType
+  channel NotificationChannel @default(IN_APP)
+  title   String
+  body    String
+  data    Json?
+  isRead  Boolean             @default(false)
+  readAt  DateTime?
+  sentAt  DateTime?
+
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([isRead])
+  @@index([type])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String?  @db.Uuid
+  action     String
+  resource   String
+  resourceId String?
+  oldValues  Json?
+  newValues  Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([resource, resourceId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
