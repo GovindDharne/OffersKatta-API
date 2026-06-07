@@ -40,6 +40,13 @@ export const envSchema = z.object({
   SMTP_PASSWORD: z.string().optional(),
   SMTP_FROM: z.string().default('no-reply@offerhub.local'),
 
+  // SMS gateway — optional. When SMS_PROVIDER + SMS_API_KEY are unset the
+  // SmsService disables itself and OTP delivery falls back to email + logs.
+  SMS_PROVIDER: z.string().optional(),
+  SMS_API_KEY: z.string().optional(),
+  SMS_SENDER_ID: z.string().optional(),
+  SMS_API_URL: z.string().optional(),
+
   THROTTLE_TTL: z.coerce.number().int().positive().default(60),
   THROTTLE_LIMIT: z.coerce.number().int().positive().default(100),
 

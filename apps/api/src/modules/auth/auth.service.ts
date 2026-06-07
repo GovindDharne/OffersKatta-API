@@ -14,6 +14,7 @@ import { customAlphabet } from 'nanoid';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CacheService } from '../cache/cache.service';
 import { MailService } from '../mail/mail.service';
+import { SmsService } from '../sms/sms.service';
 import { FirebaseService } from '../firebase/firebase.service';
 import { PermissionsService } from '../rbac/permissions.service';
 import type {
@@ -45,6 +46,7 @@ export class AuthService {
     private readonly config: ConfigService,
     private readonly cache: CacheService,
     private readonly mail: MailService,
+    private readonly sms: SmsService,
     private readonly firebase: FirebaseService,
     private readonly permissions: PermissionsService,
   ) {}
@@ -154,13 +156,9 @@ export class AuthService {
     if (user.customerProfile?.phoneVerified) {
       return { phoneVerified: true }; // idempotent
     }
-    // Reuse the same OTP cache key + bcrypt-hashed value the public endpoint uses.
-    const key = `otp:${user.phone}`;
-    const hash = await this.cache.get<string>(key);
-    if (!hash) throw new BadRequestException('OTP expired or not requested');
-    const ok = await bcrypt.compare(dto.otp, hash);
-    if (!ok) throw new BadRequestException('Invalid OTP');
-    await this.cache.del(key);
+    // Same DB-first (plaintext) + Redis-fallback check the public endpoint uses.
+    const valid = await this.checkOtp(user.phone, dto.otp);
+    if (!valid) throw new BadRequestException('OTP expired or invalid');
 
     await this.prisma.$transaction([
       this.prisma.user.update({ where: { id: userId }, data: { isVerified: true } }),
@@ -282,18 +280,72 @@ export class AuthService {
 
   async requestOtp(dto: RequestOtpDto): Promise<{ sent: true }> {
     const otp = otpGen();
+    const expiresAt = new Date(Date.now() + OTP_TTL * 1000);
+
+    // Persist the (plaintext) code on the user row when the number is already
+    // registered, so verification can read it from the DB. New numbers (public
+    // passwordless login) have no row yet — Redis below covers that case.
+    const user = await this.prisma.user.findFirst({
+      where: { phone: dto.phone, deletedAt: null },
+    });
+    if (user) {
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: { otpCode: otp, otpExpiresAt: expiresAt },
+      });
+    }
+
+    // Redis backs the pre-registration flow + acts as a fast-path fallback.
     const hash = await bcrypt.hash(otp, 8);
     await this.cache.set(`otp:${dto.phone}`, hash, OTP_TTL);
+
+    // Deliver over SMS (always) and email (when we know the user's address).
+    await this.sms.sendOtp(dto.phone, otp);
+    if (user?.email) await this.mail.sendOtp(user.email, otp);
+
     this.logger.log(`OTP for ${dto.phone}: ${otp}`);
     return { sent: true };
   }
 
+  /// Validates an OTP against the user row (plaintext + expiry) first, then the
+  /// Redis fallback. Clears both stores on success. Returns false otherwise.
+  private async checkOtp(phone: string, otp: string): Promise<boolean> {
+    const user = await this.prisma.user.findFirst({
+      where: { phone, deletedAt: null },
+    });
+
+    if (
+      user?.otpCode &&
+      user.otpExpiresAt &&
+      user.otpExpiresAt > new Date() &&
+      user.otpCode === otp
+    ) {
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: { otpCode: null, otpExpiresAt: null },
+      });
+      await this.cache.del(`otp:${phone}`);
+      return true;
+    }
+
+    const hash = await this.cache.get<string>(`otp:${phone}`);
+    if (hash && (await bcrypt.compare(otp, hash))) {
+      await this.cache.del(`otp:${phone}`);
+      if (user) {
+        await this.prisma.user.update({
+          where: { id: user.id },
+          data: { otpCode: null, otpExpiresAt: null },
+        });
+      }
+      return true;
+    }
+
+    return false;
+  }
+
   async verifyOtp(dto: VerifyOtpDto): Promise<AuthResponseDto> {
-    const hash = await this.cache.get<string>(`otp:${dto.phone}`);
-    if (!hash) throw new UnauthorizedException('OTP expired or not requested');
-    const ok = await bcrypt.compare(dto.otp, hash);
-    if (!ok) throw new UnauthorizedException('Invalid OTP');
-    await this.cache.del(`otp:${dto.phone}`);
+    const valid = await this.checkOtp(dto.phone, dto.otp);
+    if (!valid) throw new UnauthorizedException('OTP expired or invalid');
 
     let user = await this.prisma.user.findUnique({ where: { phone: dto.phone } });
     if (!user) {
