@@ -173,6 +173,11 @@ model User {
   fcmToken     String?
   locale       String    @default("en")
 
+  // OTP — plaintext code + expiry, persisted on the user for SMS/email verification.
+  // Cleared on successful verify. Redis still backs the pre-registration flow.
+  otpCode      String?
+  otpExpiresAt DateTime?
+
   // Customer profile fields
   dateOfBirth DateTime?
   gender      String?

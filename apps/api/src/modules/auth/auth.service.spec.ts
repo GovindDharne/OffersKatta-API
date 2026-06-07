@@ -25,10 +25,11 @@ function makeService(prisma: PrismaMock): AuthService {
     },
   } as unknown as ConfigService;
   const cache = { get: jest.fn(), set: jest.fn(), del: jest.fn() } as unknown as never;
-  const mail = { sendPasswordReset: jest.fn() } as unknown as never;
+  const mail = { sendPasswordReset: jest.fn(), sendOtp: jest.fn() } as unknown as never;
+  const sms = { sendOtp: jest.fn(), send: jest.fn(), isEnabled: () => false } as unknown as never;
   const firebase = { isEnabled: () => false, verifyIdToken: jest.fn() } as unknown as never;
   const perms = { invalidate: jest.fn() } as unknown as never;
-  return new AuthService(prisma as never, jwt, config, cache, mail, firebase, perms);
+  return new AuthService(prisma as never, jwt, config, cache, mail, sms, firebase, perms);
 }
 
 describe('AuthService', () => {

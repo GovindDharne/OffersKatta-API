@@ -12,6 +12,7 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 
 import { CacheModule } from './modules/cache/cache.module';
 import { MailModule } from './modules/mail/mail.module';
+import { SmsModule } from './modules/sms/sms.module';
 import { FirebaseModule } from './modules/firebase/firebase.module';
 import { CloudinaryModule } from './modules/cloudinary/cloudinary.module';
 import { RazorpayModule } from './modules/razorpay/razorpay.module';
@@ -61,6 +62,7 @@ import { HealthController } from './health.controller';
     PrismaModule,
     CacheModule,
     MailModule,
+    SmsModule,
     FirebaseModule,
     CloudinaryModule,
     RazorpayModule,
