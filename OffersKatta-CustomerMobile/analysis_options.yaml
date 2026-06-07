@@ -1,0 +1,15 @@
+include: package:flutter_lints/flutter.yaml
+
+linter:
+  rules:
+    avoid_print: false
+    prefer_single_quotes: true
+    always_declare_return_types: true
+    avoid_unused_constructor_parameters: true
+    sort_constructors_first: true
+    sort_unnamed_constructors_first: true
+
+analyzer:
+  exclude:
+    - "**/*.g.dart"
+    - "**/*.freezed.dart"

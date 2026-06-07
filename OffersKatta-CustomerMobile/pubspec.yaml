@@ -1,0 +1,59 @@
+name: offerskatta_customer
+description: OffersKatta customer app — discover nearby deals
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+
+  # State management
+  flutter_riverpod: ^2.5.1
+
+  # Networking
+  dio: ^5.7.0
+
+  # Routing
+  go_router: ^14.6.1
+
+  # Persistence
+  flutter_secure_storage: ^9.2.2
+
+  # Functional / utility
+  intl: ^0.19.0
+
+  # Location
+  geolocator: ^13.0.2
+
+  # QR display
+  qr_flutter: ^4.1.0
+
+  # URL launcher (for maps / external links)
+  url_launcher: ^6.3.1
+
+  # Native share sheet (WhatsApp / SMS / mail / copy-link / etc.)
+  share_plus: ^10.1.4
+
+  # Inline video player for offer detail's media gallery.
+  video_player: ^2.9.2
+
+  # Push notifications. firebase_core MUST be initialised before any other
+  # Firebase plugin. firebase_messaging gives us the FCM token + foreground/
+  # background message hooks. permission_handler smooths the iOS / Android-13
+  # runtime notification permission prompt.
+  firebase_core: ^3.6.0
+  firebase_messaging: ^15.1.3
+  permission_handler: ^11.3.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

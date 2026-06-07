@@ -1,0 +1,27 @@
+{
+  "name": "offerskatta-website-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OffersKatta public website — standalone repo extracted from the OffersKatta monorepo.",
+  "packageManager": "pnpm@9.12.0",
+  "engines": {
+    "node": ">=20.11.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @offerhub/web dev",
+    "build": "pnpm --filter @offerhub/web build",
+    "start": "pnpm --filter @offerhub/web start",
+    "lint": "pnpm -r --if-present lint",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test:e2e": "pnpm --filter @offerhub/web test:e2e",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\""
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "prettier": "^3.3.3",
+    "prettier-plugin-tailwindcss": "^0.6.6",
+    "typescript": "^5.6.2"
+  }
+}

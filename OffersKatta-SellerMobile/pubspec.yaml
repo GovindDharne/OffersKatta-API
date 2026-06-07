@@ -1,0 +1,54 @@
+name: offerskatta_seller
+description: OffersKatta seller app — manage brands, branches, offers, and team
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+
+  # State management
+  flutter_riverpod: ^2.5.1
+
+  # Networking
+  dio: ^5.7.0
+
+  # Routing
+  go_router: ^14.6.1
+
+  # Persistence
+  flutter_secure_storage: ^9.2.2
+
+  # Functional / utility
+  intl: ^0.19.0
+
+  # Image picking (for offer image upload)
+  image_picker: ^1.1.2
+
+  # URL launcher (for "Pay on the website" links / web fallback)
+  url_launcher: ^6.3.1
+
+  # In-app Razorpay Checkout (Android + iOS). Web falls back to opening the
+  # admin panel in the system browser.
+  razorpay_flutter: ^1.4.0
+
+  # Camera-based QR scanner for the seller "Scan customer's redemption QR"
+  # flow. Backed by ML Kit on Android / AVFoundation on iOS.
+  mobile_scanner: ^5.2.3
+
+  # Inline video preview while the seller is composing an offer (so they
+  # can verify the upload before submitting).
+  video_player: ^2.9.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
